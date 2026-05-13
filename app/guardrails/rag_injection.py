@@ -1,15 +1,21 @@
 import re
 import base64
+import unicodedata
 from typing import Tuple, List
 
 # ---------------------------------------------------------------------------
 # Homoglyph map — visually identical Unicode chars → ASCII equivalents
 # ---------------------------------------------------------------------------
 _HOMOGLYPH_MAP: dict = {
+    # Cyrillic
     "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "х": "x",
     "і": "i", "ѕ": "s", "ԁ": "d", "ո": "n", "υ": "u",
+    "А": "A", "В": "B", "С": "C", "Е": "E", "Н": "H", "І": "I",
+    "К": "K", "М": "M", "О": "O", "Р": "P", "Т": "T", "Х": "X",
+    # Greek
     "α": "a", "β": "b", "ε": "e", "ι": "i", "ο": "o", "ρ": "p",
-    "ς": "s", "τ": "t", "ν": "v",
+    "ς": "s", "τ": "t", "ν": "v", "κ": "k", "η": "n",
+    # Fullwidth
     "０": "0", "１": "1", "２": "2", "３": "3", "４": "4",
     "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
     "ａ": "a", "ｂ": "b", "ｃ": "c", "ｄ": "d", "ｅ": "e",
@@ -17,18 +23,41 @@ _HOMOGLYPH_MAP: dict = {
     "ｋ": "k", "ｌ": "l", "ｍ": "m", "ｎ": "n", "ｏ": "o",
     "ｐ": "p", "ｑ": "q", "ｒ": "r", "ｓ": "s", "ｔ": "t",
     "ｕ": "u", "ｖ": "v", "ｗ": "w", "ｘ": "x", "ｙ": "y", "ｚ": "z",
+    # Mathematical/styled
+    "𝐚": "a", "𝐛": "b", "𝐜": "c", "𝐝": "d", "𝐞": "e",
+    "ｉ": "i", "ｇ": "g", "𝐧": "n", "𝐨": "o", "𝐫": "r",
+    "𝐬": "s", "𝐭": "t", "𝐮": "u",
 }
 
 _LEET_MAP: dict = {
     "0": "o", "1": "i", "3": "e", "4": "a", "5": "s",
     "7": "t", "@": "a", "$": "s", "!": "i", "|": "i",
+    "(": "c", "{": "c", "+": "t",
 }
 
 _B64_ATTACK_KEYWORDS = [
     "ignore", "forget", "override", "jailbreak", "system prompt",
     "disregard", "bypass", "instructions", "unrestricted", "context",
-    "document", "rag", "knowledge", "retrieve",
+    "document", "rag", "knowledge", "retrieve", "dan", "delete",
+    "hack", "reveal", "pretend", "roleplay", "sudo",
 ]
+
+# ---------------------------------------------------------------------------
+# Zero-width and invisible characters to strip
+# ---------------------------------------------------------------------------
+_INVISIBLE_CHARS = re.compile(
+    "[\u200b\u200c\u200d\u200e\u200f"  # zero-width space, joiners, marks
+    "\u2060\u2061\u2062\u2063\u2064"  # word joiner, invisible operators
+    "\ufeff"  # BOM / zero-width no-break space
+    "\u00ad"  # soft hyphen
+    "\u034f"  # combining grapheme joiner
+    "\u061c"  # Arabic letter mark
+    "\u115f\u1160"  # Hangul fillers
+    "\u17b4\u17b5"  # Khmer inherent vowels
+    "\u180e"  # Mongolian vowel separator
+    "\uffa0"  # Halfwidth Hangul filler
+    "]"
+)
 
 # Glued phrases produced after space-collapse of "i g n o r e ..." style attacks
 _GLUED_ATTACK_PHRASES = [
@@ -48,10 +77,91 @@ _GLUED_ATTACK_PHRASES = [
     ("showsystemprompt",               "spaced: show system prompt"),
     ("ignoreyourrules",                "spaced: ignore your rules"),
     ("forgetyourinstructions",         "spaced: forget your instructions"),
+    ("doanythingnow",                  "spaced: do anything now (DAN)"),
+    ("ignoreallyourrules",             "spaced: ignore all your rules"),
+    ("disablesafety",                  "spaced: disable safety"),
+    ("bypassfilter",                   "spaced: bypass filter"),
+    ("developermode",                  "spaced: developer mode"),
+    ("unrestrictedmode",               "spaced: unrestricted mode"),
 ]
 
 
 def _replace_homoglyphs(text: str) -> str:
+    """Replace homoglyph characters with ASCII equivalents."""
+    return "".join(_HOMOGLYPH_MAP.get(ch, ch) for ch in text)
+
+
+def _replace_leet(text: str) -> str:
+    """Replace leet-speak characters with ASCII equivalents."""
+    return "".join(_LEET_MAP.get(ch, ch) if not ch.isalpha() else ch for ch in text)
+
+
+def _strip_invisible(text: str) -> str:
+    """Remove zero-width and invisible Unicode characters used for smuggling."""
+    return _INVISIBLE_CHARS.sub("", text)
+
+    return _INVISIBLE_CHARS.sub("", text)
+
+
+def _strip_diacritics(text: str) -> str:
+    """Remove accents/diacritics: ïgnörè → ignore."""
+    nfkd = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+
+
+def _strip_markdown_html(text: str) -> str:
+    """Extract text hidden in markdown/HTML comments or invisible elements."""
+    extras = []
+    # HTML comments <!-- hidden instructions -->
+    for m in re.finditer(r"<!--(.*?)-->", text, re.DOTALL):
+        extras.append(m.group(1))
+    # Hidden HTML elements
+    for m in re.finditer(
+        r"<(?:div|span|p|script|style)[^>]*(?:hidden|display\s*:\s*none)[^>]*>(.*?)</(?:div|span|p|script|style)>",
+        text, re.DOTALL | re.IGNORECASE,
+    ):
+        extras.append(m.group(1))
+    # Markdown image alt text abuse ![](ignored "real payload here")
+    for m in re.finditer(r'!\[[^\]]*\]\([^)]*"([^"]+)"\)', text):
+        extras.append(m.group(1))
+    if extras:
+        return text + " " + " ".join(extras)
+    return text
+
+
+def _collapse_separators(text: str) -> str:
+    """
+    Collapse separator-obfuscated text: I-G-N-O-R-E, I.G.N.O.R.E, I_G_N_O_R_E
+    Also handles spaced-out text: 'i g n o r e p r e v i o u s' → 'ignore previous'.
+    """
+    # Separator-separated single chars: I-G-N-O-R-E → IGNORE
+    text = re.sub(
+        r"(?<!\w)(\w(?:[.\-_~|/\\]{1,2}\w){3,})(?!\w)",
+        lambda m: " " + re.sub(r"[.\-_~|/\\]+", "", m.group(0)) + " ",
+        text,
+    )
+    # Space-separated single chars: i g n o r e → ignore
+    text = re.sub(
+        r"(?<!\w)(\w(?:[ ]{1,5}\w){3,})(?!\w)",
+        lambda m: " " + m.group(0).replace(" ", "") + " ",
+        text,
+    )
+    return re.sub(r" {2,}", " ", text).strip()
+
+
+def _check_reversed_text(text: str) -> Tuple[bool, str]:
+    """Check if reversing the text reveals attack phrases."""
+    reversed_text = text[::-1].lower()
+    _REVERSED_KEYWORDS = [
+        "ignore instructions", "system prompt", "jailbreak",
+        "forget rules", "bypass safety", "override",
+        "reveal prompt", "delete all", "hack",
+    ]
+    for kw in _REVERSED_KEYWORDS:
+        if kw in reversed_text:
+            return True, f"reversed_text: {kw}"
+    return False, ""
+
     return "".join(_HOMOGLYPH_MAP.get(ch, ch) for ch in text)
 
 
@@ -61,7 +171,7 @@ def _replace_leet(text: str) -> str:
 
 def _decode_base64_payloads(text: str) -> str:
     extras = []
-    for blob in re.findall(r"[A-Za-z0-9+/]{20,}={0,2}", text):
+    for blob in re.findall(r"[A-Za-z0-9+/]{16,}={0,2}", text):
         try:
             decoded = base64.b64decode(blob + "==").decode("utf-8", errors="ignore")
             if any(kw in decoded.lower() for kw in _B64_ATTACK_KEYWORDS):
@@ -254,7 +364,12 @@ class RAGInjectionDetector:
     
     @classmethod
     def _clean(cls, text: str) -> str:
-        """Clean text: remove URLs, normalize whitespace."""
+        """Phase 1: basic cleaning before normalisation."""
+        # Strip invisible chars
+        text = _strip_invisible(text)
+        # Extract hidden content from markdown/HTML
+        text = _strip_markdown_html(text)
+        # Strip URLs
         text = re.sub(r"https?://\S+", " ", text)
         text = re.sub(r"\r\t", " ", text)
         lines = [re.sub(r" {2,}", " ", ln).strip() for ln in text.split("\n")]
@@ -263,31 +378,31 @@ class RAGInjectionDetector:
     @classmethod
     def _normalise(cls, text: str) -> str:
         """
-        Multi-layer normalization pipeline to defeat obfuscation:
-        1. URL stripping
-        2. Base64 decode (before leet corrupts alphabet)
+        Phase 2: aggressive normalisation pipeline to defeat obfuscation:
+        1. Base64 decode (before leet corrupts alphabet)
+        2. Diacritic removal (ïgnörè → ignore)
         3. Homoglyph substitution (Cyrillic/Greek → ASCII)
-        4. Leet-speak normalization
-        5. Spaced-out text collapse
-        6. Typo normalization
-        7. Re-attempt base64 decode
+        4. Leet-speak normalization (1gn0r3 → ignore)
+        5. Separator/space collapse (i-g-n-o-r-e / i g n o r e → ignore)
+        6. Base64 decode again (in case normalization exposed new blobs)
+        7. Typo normalization (repeated chars + stuttered endings)
         """
         # 1. Base64 FIRST — before leet corrupts base64 alphabet chars
         text = _decode_base64_payloads(text)
-        # 2. Homoglyph substitution
+        # 2. Diacritic removal (ïgnörè → ignore)
+        text = _strip_diacritics(text)
+        # 3. Homoglyph substitution
         text = _replace_homoglyphs(text)
-        # 3. Leet-speak (digits/symbols → letters)
+        # 4. Leet-speak (digits/symbols → letters)
         text = _replace_leet(text)
-        # 4. Spaced-out text: collapse then pad with spaces so \b still works
-        def _collapse(m):
-            return " " + m.group(0).replace(" ", "") + " "
-        text = re.sub(r"(?<!\w)(\w(?:[ ]{1,3}\w){3,})(?!\w)", _collapse, text)
-        text = re.sub(r" {2,}", " ", text).strip()
+        # 5. Separator + spaced-out text collapse
+        text = _collapse_separators(text)
+        # 6. Second base64 pass (in case normalization exposed new blobs)
         text = _decode_base64_payloads(text)
-        # 5. Typo fix: repeated chars + attack word roots
+        # 7. Typo fix — collapse repeated chars and fix stuttered endings
         attack_roots = (
             r"delet|remov|wip|purg|eras|execut|format|reset|nuke"
-            r"|hack|leak|dump|exfiltrat|bypass|override"
+            r"|hack|leak|dump|exfiltrat|bypass|override|ignor|forget|disregard"
         )
         text = re.sub(r"(.)\1{2,}", r"\1\1", text)
         text = re.sub(rf"({attack_roots})(\w)\2\b", r"\1\2", text, flags=re.IGNORECASE)
@@ -358,6 +473,16 @@ class RAGInjectionDetector:
         Detect RAG injection attempts in context documents with robust multi-layer matching.
         
         Returns: (is_injection, risk_score 0-1, matched_patterns)
+        
+        Multi-layer detection:
+        • Direct high-confidence pattern matching
+        • Glued phrase detection (collapsed spaced-out text)
+        • Role assignment + destructive action combos
+        • Medium-confidence pattern accumulation
+        • Structure-based attacks (XML, JSON, markdown, code blocks)
+        • Obfuscation detection
+        • Invisible character smuggling
+        • Reversed text attacks
         """
         if not text or len(text.strip()) == 0:
             return False, 0.0, []
@@ -369,10 +494,36 @@ class RAGInjectionDetector:
         if not cls._is_valid_document(text):
             return True, 0.7, ["suspicious_document_structure"]
         
-        # Clean and normalize text through multi-layer pipeline
+        # Clean text first
         cleaned = cls._clean(text)
+        
+        # Check for obfuscation BEFORE normalization (leet-speak destroys special char patterns)
+        obfuscation_pattern = r"[a-z][@#$%&*!]{2,}[a-z]"
+        obfuscation_match = re.search(obfuscation_pattern, cleaned.lower())
+        obfuscation_detected = obfuscation_match is not None
+        
+        # Check for invisible-char smuggling (presence of stripped chars = suspicious)
+        invisible_count = len(_INVISIBLE_CHARS.findall(text))
+        
+        # Normalize text through multi-layer pipeline
         normalised = cls._normalise(cleaned)
         low = normalised.lower()
+        
+        # ── Invisible character evidence ──
+        if invisible_count > 3:
+            evidence.append(f"invisible_chars: {invisible_count} detected")
+            high_score = max(high_score, 0.5)
+        
+        # ── Obfuscation evidence ──
+        if obfuscation_detected:
+            evidence.append(f"obfuscation_detected: «{obfuscation_match.group(0)}»")
+            high_score = max(high_score, 0.45)
+        
+        # ── Reversed text check ──
+        is_reversed, reversed_ev = _check_reversed_text(cleaned)
+        if is_reversed:
+            evidence.append(reversed_ev)
+            high_score = max(high_score, 0.6)
         
         # ── High-confidence patterns
         for pattern, label in cls.HIGH_CONFIDENCE_PATTERNS:
