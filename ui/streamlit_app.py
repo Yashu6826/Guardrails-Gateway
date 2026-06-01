@@ -366,13 +366,13 @@ with col_result:
                     </div>""", unsafe_allow_html=True)
 
                     # Score gauge
-                    pct = int(score * 100)
+                    pct = int(score)
                     bar_color = (
-                        "linear-gradient(90deg,#22c55e,#16a34a)" if score < 0.4
-                        else "linear-gradient(90deg,#eab308,#ca8a04)" if score < 0.8
+                        "linear-gradient(90deg,#22c55e,#16a34a)" if score < 40
+                        else "linear-gradient(90deg,#eab308,#ca8a04)" if score < 80
                         else "linear-gradient(90deg,#ef4444,#dc2626)"
                     )
-                    score_color = "#16a34a" if score < 0.4 else "#ca8a04" if score < 0.8 else "#dc2626"
+                    score_color = "#16a34a" if score < 40 else "#ca8a04" if score < 80 else "#dc2626"
                     st.markdown(f"""
                     <div style="background:#ffffff;border:1.5px solid #e2e8f0;border-radius:12px;
                                 padding:1.2rem 1.4rem;margin-bottom:1.2rem;
@@ -384,15 +384,15 @@ with col_result:
                             <div style="font-size:2.8rem;font-weight:800;
                                         font-family:'JetBrains Mono',monospace;
                                         letter-spacing:-0.04em;line-height:1;
-                                        min-width:90px;color:{score_color};">{score:.2f}</div>
+                                        min-width:90px;color:{score_color};">{score}</div>
                             <div style="flex:1;">
                                 <div class="score-bar-track">
                                     <div class="score-bar-fill"
                                          style="width:{pct}%;background:{bar_color};"></div>
                                 </div>
                                 <div class="score-legend">
-                                    <span>0.0</span><span>0.4 allow</span>
-                                    <span>0.8 block</span><span>1.0</span>
+                                    <span>0</span><span>40 allow</span>
+                                    <span>80 block</span><span>100</span>
                                 </div>
                             </div>
                         </div>

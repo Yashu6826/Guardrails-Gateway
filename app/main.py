@@ -1,24 +1,35 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import os
 import logging
 from typing import List
 
-from app.models import AnalyzeRequest, AnalyzeResponse, PolicyResponse, Decision
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.models import AnalyzeRequest, AnalyzeResponse, PolicyResponse, Decision, ContextDoc
 from app.guardrails.risk_scorer import RiskScorer
-from app.guardrails.prompt_injection import PromptInjectionDetector
-from app.guardrails.pii_detector import PIIDetector
-from app.guardrails.rag_injection import RAGInjectionDetector
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Guardrails Gateway", version="1.0.0")
+# Exactly 2 endpoints — disable OpenAPI surface entirely
+app = FastAPI(
+    title="Guardrails Gateway",
+    version="1.0.0",
+    openapi_url=None,
+    docs_url=None,
+    redoc_url=None,
+)
 
-# Enable CORS for UI
+# CORS — restrict origins via env var, default to localhost only
+_allowed_origins = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:8501,http://localhost:3000",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -27,6 +38,7 @@ app.add_middleware(
 # Initialize risk scorer
 risk_scorer = RiskScorer()
 
+
 @app.post("/analyze", response_model=AnalyzeResponse)
 async def analyze_request(request: AnalyzeRequest):
     """
@@ -34,73 +46,55 @@ async def analyze_request(request: AnalyzeRequest):
     Returns policy decision, risk score, tags, and redacted content.
     """
     try:
-        # Log minimal information (no prompt/response content)
-        logger.info(f"Processing request - app_id: {request.metadata.app_id}, "
-                   f"user_id: {request.metadata.user_id}, "
-                   f"request_id: {request.metadata.request_id}")
-        
-        # Convert context docs to dict format
+        logger.info(
+            "Processing request - app_id: %s, user_id: %s, request_id: %s",
+            request.metadata.app_id,
+            request.metadata.user_id,
+            request.metadata.request_id,
+        )
+
         context_docs = [
-            {"id": doc.id, "text": doc.text} 
+            {"id": doc.id, "text": doc.text}
             for doc in request.context_docs
         ]
-        
-        # Analyze risks
+
         result = risk_scorer.analyze(request.prompt, context_docs)
-        
-        # Log risk assessment (no content)
-        logger.info(f"Risk assessment - decision: {result['decision']}, "
-                   f"score: {result['risk_score']}, "
-                   f"tags: {result['risk_tags']}")
-        
-        # Convert sanitized docs back to ContextDoc objects
-        sanitized_docs = [
-            {"id": doc['id'], "text": doc['text']}
-            for doc in result['sanitized_context_docs']
-        ]
-        
-        return AnalyzeResponse(
-            decision=Decision(result['decision']),
-            risk_score=result['risk_score'],
-            risk_tags=result['risk_tags'],
-            sanitized_prompt=result['sanitized_prompt'],
-            sanitized_context_docs=sanitized_docs,
-            raw_response=result.get('details')
+
+        logger.info(
+            "Risk assessment - decision: %s, score: %s, tags: %s",
+            result["decision"],
+            result["risk_score"],
+            result["risk_tags"],
         )
-        
+
+        sanitized_docs = [
+            ContextDoc(id=doc["id"], text=doc["text"])
+            for doc in result["sanitized_context_docs"]
+        ]
+
+        return AnalyzeResponse(
+            decision=Decision(result["decision"]),
+            risk_score=result["risk_score"],
+            risk_tags=result["risk_tags"],
+            sanitized_prompt=result["sanitized_prompt"],
+            sanitized_context_docs=sanitized_docs,
+            reasons=result.get("reasons", []),
+        )
+
     except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(
+            "Error processing request (request_id=%s): %s",
+            request.metadata.request_id,
+            str(e),
+        )
+        raise HTTPException(status_code=500, detail="internal error")
 
-@app.get("/policy")
+
+@app.get("/policy", response_model=PolicyResponse)
 async def get_policy():
-    """
-    Get the current policy configuration.
-    """
+    """Return the loaded policy / detectors configuration."""
     return PolicyResponse(
-        policies={
-            "prompt_injection": {
-                "enabled": True,
-                "threshold": 0.5,
-                "action": "block"
-            },
-            "pii": {
-                "enabled": True,
-                "redaction": True,
-                "detection_types": ["email", "phone", "ssn", "credit_card"]
-            },
-            "rag_injection": {
-                "enabled": True,
-                "threshold": 0.6,
-                "action": "block"
-            }
-        },
-        version="1.0.0"
+        version="1",
+        detectors=["prompt_injection", "pii", "rag_injection"],
+        thresholds={"block_score": 80, "transform_score": 40},
     )
-
-@app.get("/health")
-async def health_check():
-    """
-    Health check endpoint.
-    """
-    return {"status": "healthy"}

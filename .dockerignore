@@ -1,0 +1,32 @@
+# Version control
+.git/
+.gitignore
+
+# Python cache and environments
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker and compose
+.dockerignore
+docker-compose.yml
+Dockerfile.*
+
+# Documentation and config
+*.md
+.env
+.env.local
